@@ -1,0 +1,594 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────── ENUMS ───────────────
+enum Role {
+  ADMIN
+  BARBER
+  CLIENT
+}
+
+enum AbsenceType {
+  VACATION
+  PERMISSION
+  SICK
+  OTHER
+}
+
+enum AbsenceStatus {
+  ACTIVE
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  ONLINE
+  ADMIN
+  BARBER
+}
+
+enum GoogleStatus {
+  CONNECTED
+  NEEDS_REAUTH
+  DISCONNECTED
+  ERROR
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  DELETED
+}
+
+enum SaleStatus {
+  PENDING
+  PAID
+  VOID
+}
+
+enum SaleItemType {
+  SERVICE
+  PRODUCT
+}
+
+enum PaymentMethod {
+  CASH
+  TRANSFER
+  CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  RECORDED
+  VOIDED
+}
+
+enum PointsKind {
+  EARNED
+  REDEEMED
+  REVERSAL
+  ADJUSTMENT
+}
+
+enum BenefitStatus {
+  USED
+  REVOKED
+}
+
+enum StockReason {
+  PURCHASE
+  SALE
+  ADJUSTMENT
+  RETURN
+}
+
+// ─────────────── CONFIGURACIÓN DEL NEGOCIO ───────────────
+// Una sola fila (id = "shop"). Todo lo que cambia entre barberías vive aquí.
+model ShopSettings {
+  id                  String   @id @default("shop")
+  name                String   @default("Barber Shop")
+  tagline             String   @default("Un corte, una experiencia")
+  heroTitle           String   @default("El mejor estilo")
+  heroSubtitle        String   @default("Tienda especializada en cortes de barba y cabello. Todo sobre corte, barbería y asesoría de imagen para el hombre.")
+  about               String   @default("")
+  logoUrl             String?
+  heroImageUrl        String?
+  galleryUrls         Json     @default("[]")
+  phone               String?
+  email               String?
+  address             String?
+  openingHours        Json     @default("[]")
+  socialLinks         Json     @default("{}")
+  // SEO: cómo aparece el sitio en Google. Vacío = se generan a partir del nombre y los textos.
+  seoTitle            String?
+  seoDescription      String?
+  city                String?
+  timezone            String   @default("America/Guatemala")
+  currency            String   @default("GTQ")
+  primaryColor        String   @default("#02492a")
+  accentColor         String   @default("#fbbd41")
+  slotStepMinutes     Int      @default(50)
+  cancellationMinutes Int      @default(120)
+  pointsPerService    Int      @default(25)
+  pointsForBenefit    Int      @default(100)
+  benefitPercent      Int      @default(50)
+  updatedAt           DateTime @updatedAt
+}
+
+// ─────────────── USUARIOS Y AUTENTICACIÓN ───────────────
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  phone         String?
+  role          Role      @default(CLIENT)
+  isActive      Boolean   @default(true)
+  // Solo para ADMIN: con sucursal, ve y opera únicamente esa sucursal; sin sucursal, ve todas.
+  branchId      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  branch        Branch?   @relation("UserBranch", fields: [branchId], references: [id])
+  accounts      Account[]
+  sessions      Session[]
+  resetTokens   PasswordResetToken[]
+  customer      Customer?
+  barber        Barber?
+  auditLogs     AuditLog[]
+
+  appointmentsCreated Appointment[]              @relation("AppointmentCreatedBy")
+  statusChanges       AppointmentStatusHistory[] @relation("StatusChangedBy")
+  absencesCreated     Absence[]                  @relation("AbsenceCreatedBy")
+  salesCreated        Sale[]                     @relation("SaleCreatedBy")
+  paymentsRecorded    Payment[]                  @relation("PaymentRecordedBy")
+  stockMovements      StockMovement[]            @relation("StockMovementBy")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ─────────────── SUCURSALES ───────────────
+// Los puntos son del CLIENTE (valen en todas las sucursales); las ventas se llevan por sucursal.
+model Branch {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  barbers      Barber[]
+  appointments Appointment[]
+  sales        Sale[]
+  admins       User[]        @relation("UserBranch")
+}
+
+// ─────────────── CLIENTES Y BARBEROS ───────────────
+// Customer puede existir sin cuenta (cliente registrado a mano en el local).
+model Customer {
+  id        String   @id @default(cuid())
+  userId    String?  @unique
+  fullName  String
+  phone     String
+  email     String?
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  appointments Appointment[]
+  sales        Sale[]
+  pointsLedger PointsLedger[]
+  benefits     LoyaltyBenefit[]
+
+  @@index([phone])
+  @@index([email])
+}
+
+model Barber {
+  id                  String    @id @default(cuid())
+  userId              String?   @unique
+  displayName         String
+  bio                 String?
+  photoUrl            String?
+  phone               String?
+  email               String?
+  isActive            Boolean   @default(true)
+  canRegisterPayments Boolean   @default(false)
+  canViewRevenue      Boolean   @default(false)
+  deletedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user             User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  workingHours     WorkingHours[]
+  absences         Absence[]
+  appointments     Appointment[]
+  googleConnection GoogleConnection?
+  sales            Sale[]
+  // Sucursales donde atiende. Sin ninguna asignada = atiende en todas.
+  branches         Branch[]
+}
+
+// Horario habitual. Varias filas por día permiten pausas (ej. 9–13 y 14–18).
+model WorkingHours {
+  id          String @id @default(cuid())
+  barberId    String
+  weekday     Int // 0 = domingo … 6 = sábado
+  startMinute Int // minutos desde las 00:00 hora local
+  endMinute   Int
+
+  barber Barber @relation(fields: [barberId], references: [id], onDelete: Cascade)
+
+  @@unique([barberId, weekday, startMinute])
+  @@index([barberId, weekday])
+}
+
+model Absence {
+  id          String        @id @default(cuid())
+  barberId    String
+  type        AbsenceType   @default(OTHER)
+  startsAt    DateTime      @db.Timestamptz(3)
+  endsAt      DateTime      @db.Timestamptz(3)
+  allDay      Boolean       @default(false)
+  reason      String?
+  status      AbsenceStatus @default(ACTIVE)
+  createdById String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  barber    Barber @relation(fields: [barberId], references: [id])
+  createdBy User?  @relation("AbsenceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([barberId, startsAt, endsAt])
+}
+
+// ─────────────── CATÁLOGO ───────────────
+model Service {
+  id              String    @id @default(cuid())
+  name            String
+  description     String?
+  priceCents      Int
+  durationMinutes Int       @default(50)
+  imageUrl        String?
+  isActive        Boolean   @default(true)
+  sortOrder       Int       @default(0)
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  appointments Appointment[]
+  saleItems    SaleItem[]
+}
+
+model Product {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  priceCents  Int
+  imageUrl    String?
+  trackStock  Boolean   @default(false)
+  stock       Int       @default(0)
+  lowStockAt  Int       @default(3)
+  isActive    Boolean   @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  stockMovements StockMovement[]
+  saleItems      SaleItem[]
+}
+
+model StockMovement {
+  id          String      @id @default(cuid())
+  productId   String
+  delta       Int
+  reason      StockReason
+  saleId      String?
+  note        String?
+  createdById String?
+  createdAt   DateTime    @default(now())
+
+  product   Product @relation(fields: [productId], references: [id])
+  sale      Sale?   @relation(fields: [saleId], references: [id])
+  createdBy User?   @relation("StockMovementBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([productId, createdAt])
+}
+
+// ─────────────── CITAS ───────────────
+// Precio y duración se copian al reservar (instantánea). El choque de horarios
+// lo impide una restricción EXCLUDE en PostgreSQL (ver prisma/sql).
+model Appointment {
+  id              String            @id @default(cuid())
+  customerId      String
+  barberId        String
+  serviceId       String
+  startsAt        DateTime          @db.Timestamptz(3)
+  endsAt          DateTime          @db.Timestamptz(3)
+  status          AppointmentStatus @default(PENDING)
+  source          AppointmentSource @default(ONLINE)
+  priceCents      Int
+  durationMinutes Int
+  notes           String?
+  cancelReason    String?
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+  branchId        String?
+  createdById     String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  branch        Branch?                    @relation(fields: [branchId], references: [id])
+  customer      Customer                   @relation(fields: [customerId], references: [id])
+  barber        Barber                     @relation(fields: [barberId], references: [id])
+  service       Service                    @relation(fields: [serviceId], references: [id])
+  createdBy     User?                      @relation("AppointmentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  history       AppointmentStatusHistory[]
+  calendarEvent CalendarEvent?
+  sales         Sale[]
+  pointsEntries PointsLedger[]
+
+  @@index([barberId, startsAt])
+  @@index([customerId, startsAt])
+  @@index([status, startsAt])
+  @@index([branchId, startsAt])
+}
+
+model AppointmentStatusHistory {
+  id            String             @id @default(cuid())
+  appointmentId String
+  fromStatus    AppointmentStatus?
+  toStatus      AppointmentStatus
+  changedById   String?
+  note          String?
+  createdAt     DateTime           @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  changedBy   User?       @relation("StatusChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([appointmentId, createdAt])
+}
+
+// ─────────────── GOOGLE CALENDAR ───────────────
+// Los tokens se guardan CIFRADOS (AES-256-GCM, clave en TOKEN_ENCRYPTION_KEY).
+model GoogleConnection {
+  id                String       @id @default(cuid())
+  barberId          String       @unique
+  googleEmail       String
+  calendarId        String       @default("primary")
+  accessTokenEnc    String
+  refreshTokenEnc   String?
+  accessTokenExpiry DateTime?
+  scopes            String
+  status            GoogleStatus @default(CONNECTED)
+  lastError         String?
+  lastSyncAt        DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  barber Barber @relation(fields: [barberId], references: [id], onDelete: Cascade)
+}
+
+model CalendarEvent {
+  id            String     @id @default(cuid())
+  appointmentId String     @unique
+  calendarId    String
+  googleEventId String
+  etag          String?
+  syncStatus    SyncStatus @default(PENDING)
+  attempts      Int        @default(0)
+  lastError     String?
+  lastSyncAt    DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@unique([calendarId, googleEventId])
+}
+
+// ─────────────── VENTAS Y PAGOS ───────────────
+// Venta = lo vendido (detalle y desglose). Pago = dinero realmente recibido.
+// Una venta PENDING no cuenta como dinero cobrado.
+model Sale {
+  id             String     @id @default(cuid())
+  appointmentId  String?
+  branchId       String?
+  customerId     String?
+  barberId       String?
+  status         SaleStatus @default(PENDING)
+  subtotalCents  Int
+  discountCents  Int        @default(0)
+  totalCents     Int
+  idempotencyKey String     @unique
+  voidReason     String?
+  voidedAt       DateTime?
+  paidAt         DateTime?
+  createdById    String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  appointment   Appointment?      @relation(fields: [appointmentId], references: [id])
+  branch        Branch?           @relation(fields: [branchId], references: [id])
+  customer      Customer?         @relation(fields: [customerId], references: [id])
+  barber        Barber?           @relation(fields: [barberId], references: [id])
+  createdBy     User?             @relation("SaleCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  items         SaleItem[]
+  payments      Payment[]
+  benefit       LoyaltyBenefit?
+  pointsEntries PointsLedger[]
+  stockMoves    StockMovement[]
+
+  @@index([status, createdAt])
+  @@index([branchId, status, paidAt])
+  @@index([barberId, createdAt])
+  @@index([customerId])
+  @@index([appointmentId])
+}
+
+model SaleItem {
+  id             String       @id @default(cuid())
+  saleId         String
+  type           SaleItemType
+  serviceId      String?
+  productId      String?
+  description    String
+  quantity       Int          @default(1)
+  unitPriceCents Int
+  totalCents     Int
+
+  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  service Service? @relation(fields: [serviceId], references: [id])
+  product Product? @relation(fields: [productId], references: [id])
+
+  @@index([saleId])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  saleId         String
+  method         PaymentMethod
+  amountCents    Int
+  receivedCents  Int?
+  changeCents    Int?
+  reference      String?
+  status         PaymentStatus @default(RECORDED)
+  idempotencyKey String        @unique
+  recordedById   String?
+  paidAt         DateTime      @default(now())
+  voidedAt       DateTime?
+  voidReason     String?
+  createdAt      DateTime      @default(now())
+
+  sale       Sale  @relation(fields: [saleId], references: [id])
+  recordedBy User? @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@index([saleId])
+  @@index([paidAt])
+}
+
+// ─────────────── FIDELIZACIÓN ───────────────
+// El saldo es la suma de delta. Nada se borra: las correcciones son filas nuevas.
+// @@unique evita otorgar dos veces los puntos de la misma cita.
+model PointsLedger {
+  id            String     @id @default(cuid())
+  customerId    String
+  delta         Int
+  kind          PointsKind
+  appointmentId String?
+  saleId        String?
+  benefitId     String?
+  note          String?
+  createdAt     DateTime   @default(now())
+
+  customer    Customer         @relation(fields: [customerId], references: [id])
+  appointment Appointment?     @relation(fields: [appointmentId], references: [id])
+  sale        Sale?            @relation(fields: [saleId], references: [id])
+  benefit     LoyaltyBenefit?  @relation(fields: [benefitId], references: [id])
+
+  @@unique([appointmentId, kind])
+  @@index([customerId, createdAt])
+}
+
+// Un beneficio se registra al consumirse; saleId único impide usarlo dos veces en la misma venta.
+model LoyaltyBenefit {
+  id         String        @id @default(cuid())
+  customerId String
+  percent    Int
+  pointsCost Int
+  status     BenefitStatus @default(USED)
+  saleId     String?       @unique
+  usedAt     DateTime      @default(now())
+  createdAt  DateTime      @default(now())
+
+  customer      Customer       @relation(fields: [customerId], references: [id])
+  sale          Sale?          @relation(fields: [saleId], references: [id])
+  pointsEntries PointsLedger[]
+
+  @@index([customerId])
+}
+
+// ─────────────── AUDITORÍA ───────────────
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  data      Json?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
