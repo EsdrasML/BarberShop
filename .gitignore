@@ -1,4 +1,4 @@
-# Dependencias y compilación (se regeneran; nunca se suben)
+
 node_modules
 .next
 out
@@ -9,7 +9,7 @@ out
 next-env.d.ts
 coverage
 
-# SECRETOS: nunca se suben. Solo .env.example (sin valores reales) va al repositorio.
+
 .env
 .env.*
 !.env.example
@@ -19,13 +19,12 @@ coverage
 service-account*.json
 credentials*.json
 
-# Copias de bases de datos o respaldos con datos de clientes
+
 *.dump
 *.bak
 backup*
 dump*
 
-# Archivos del sistema y del editor
 .DS_Store
 Thumbs.db
 .idea
